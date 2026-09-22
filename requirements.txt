@@ -1,0 +1,37 @@
+# Support Triage System — Python dependencies
+# Grouped by the phase that introduces them. See DECISIONS.md for the reasoning behind each
+# library choice (framework, vector store, provider strategy, etc.).
+#
+# Install with: pip install -r requirements.txt
+
+# --- Core / all phases ---
+python-dotenv==1.0.1        # loads ANTHROPIC_API_KEY etc. from a local .env file instead of hardcoding secrets
+pydantic==2.9.2              # data validation + schemas; used for tool input/output contracts and structured LLM outputs
+
+# --- Phase 1: Core agent framework ---
+langgraph==0.2.53            # multi-agent orchestration as an explicit state graph (Triage -> specialist agents)
+langchain-core==0.3.21       # shared LangChain abstractions (BaseChatModel, messages, tools) that LangGraph builds on
+langchain-anthropic==0.3.0   # ChatAnthropic: LangChain's chat-model wrapper around the Anthropic API
+
+# --- Phase 2: Tool use / MCP ---
+mcp==1.1.2                   # official Model Context Protocol SDK (server + client) for the log-search tool
+langchain-chroma==0.1.4      # Chroma vector store integration, for the Research agent's RAG-over-docs tool
+chromadb==0.5.20             # embedded vector database backing langchain-chroma
+
+# --- Phase 3: Memory & planning ---
+langgraph-checkpoint-sqlite==2.0.1   # persists multi-turn conversation state across a LangGraph run, to a local SQLite file
+
+# --- Phase 5: Evaluation & observability ---
+ragas==0.2.6                 # retrieval evaluation (faithfulness, context precision/recall) for the Research agent
+langsmith==0.1.147           # tracing/observability for the LangGraph pipeline
+
+# --- Phase 6: Production shape ---
+fastapi==0.115.5             # HTTP API layer
+uvicorn[standard]==0.32.1    # ASGI server that runs the FastAPI app
+langchain-community==0.3.9   # community integrations, incl. Snowflake Cortex chat model
+snowflake-connector-python==3.12.4   # underlying Snowflake client used by the Cortex integration
+
+# --- Testing & tooling ---
+pytest==8.3.3                # test runner
+pytest-asyncio==0.24.0       # lets pytest run the async tool/agent tests
+ruff==0.8.1                  # lint + format (see DECISIONS.md #6)
