@@ -10,8 +10,9 @@ pydantic==2.9.2              # data validation + schemas; used for tool input/ou
 
 # --- Phase 1: Core agent framework ---
 langgraph==0.2.53            # multi-agent orchestration as an explicit state graph (Triage -> specialist agents)
-langchain-core==0.3.21       # shared LangChain abstractions (BaseChatModel, messages, tools) that LangGraph builds on
-langchain-anthropic==0.3.0   # ChatAnthropic: LangChain's chat-model wrapper around the Anthropic API
+langchain-core==0.3.33       # shared LangChain abstractions (BaseChatModel, messages, tools) that LangGraph builds on
+langchain-ollama==0.2.3      # ChatOllama: free, runs models locally via the Ollama app (default provider, see DECISIONS.md #2)
+langchain-anthropic==0.3.0   # ChatAnthropic: paid, used when LLM_PROVIDER=anthropic for higher-quality comparison runs
 
 # --- Phase 2: Tool use / MCP ---
 mcp==1.1.2                   # official Model Context Protocol SDK (server + client) for the log-search tool

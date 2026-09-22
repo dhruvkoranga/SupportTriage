@@ -36,7 +36,8 @@ were.
 | Layer | Choice |
 |---|---|
 | Orchestration | LangGraph |
-| LLM (dev) | Anthropic API (`claude-sonnet-5`) via `langchain-anthropic` |
+| LLM (dev, default) | Ollama, local + free (`llama3.1:8b`) via `langchain-ollama` |
+| LLM (dev, optional) | Anthropic API (`claude-sonnet-5`) via `langchain-anthropic` |
 | LLM (prod, Phase 6) | Snowflake Cortex via `langchain-community` |
 | RAG vector store | Chroma |
 | Tool protocol | MCP (log-search tool) + direct LangChain tools (ticketing API, DB query) |
@@ -72,9 +73,19 @@ venv\Scripts\activate        # Windows
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure secrets (create a .env file — never commit this)
-# ANTHROPIC_API_KEY=sk-ant-...
+# Install Ollama (https://ollama.com) and pull the default model — one-time, ~5GB
+ollama pull llama3.1:8b
+
+# Configure environment (copy the example and edit if needed — defaults work out of the box)
+cp .env.example .env
 ```
+
+No API key is required by default — LLM_PROVIDER=ollama runs entirely locally and free. Set
+LLM_PROVIDER=anthropic in .env (and add an ANTHROPIC_API_KEY) if you want to compare output
+quality against a paid model — see [DECISIONS.md](DECISIONS.md#2-llm-provider-strategy-dev-vs-production).
+
+> **Note:** the full `requirements.txt` includes `chromadb` (Phase 2), which needs Microsoft's
+> Visual C++ Build Tools to compile on Windows. Not needed until Phase 2 — install it before then.
 
 A `.env.example` will be added once Phase 1 introduces the first agent that needs a key — see
 [DECISIONS.md](DECISIONS.md) for how the LLM provider is kept swappable between Anthropic and

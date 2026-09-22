@@ -39,34 +39,52 @@ routing (AutoGen's strength), or prototyping speed matters more than architectur
 
 ## 2. LLM provider strategy (dev vs. production)
 
-**Choice:** Direct Anthropic API during development (Phases 1-5), via LangChain's `ChatAnthropic`
-class. Swap to Snowflake Cortex (via `langchain-community`'s Cortex chat model) for Phase 6,
-selected through a single factory function reading an environment variable — no per-agent code
-changes required to switch.
+**Choice:** Free, local Ollama (`ChatOllama`, `llama3.1:8b`) is the default for day-to-day
+development. The Anthropic API (`ChatAnthropic`, `claude-sonnet-5`) is available via the same
+factory for quality comparisons. Snowflake Cortex (via `langchain-community`) arrives for
+Phase 6. All three are selected through a single factory function reading `LLM_PROVIDER` — no
+per-agent code changes required to switch.
 
-**Alternatives considered:** Hand-rolled provider abstraction (our own interface wrapping both
-SDKs); building every agent directly against the Snowflake Cortex SDK from day one.
+*(Revised from the original plan of defaulting to the Anthropic API. Since this project is for
+learning, not production, avoiding per-token cost during iteration was the deciding factor — see
+below. Also revised once already since: started on `llama3.2:3b`, which failed a basic grounding
+test — see "Revisit if" below for what happened and why `llama3.1:8b` is the default now.)*
+
+**Alternatives considered:** Direct Anthropic API as the default (the original plan); Google
+Gemini free tier; Groq free tier; a hand-rolled provider abstraction instead of leaning on
+LangChain's.
 
 **Why:**
 - LangChain's `BaseChatModel` is *already* the abstraction layer we'd otherwise build ourselves —
-  every agent talks to a `BaseChatModel`, never to `anthropic.Client` or a Snowflake connection
-  directly. Swapping providers becomes a one-line change in a `get_chat_model()` factory instead
-  of a custom adapter class. This is "simplicity first" applied to architecture: don't build an
-  abstraction the framework already gives you for free.
-- Developing against the Anthropic API directly is the fastest inner loop (no cloud account
-  friction, cheapest to debug, best error messages) — so it's the right choice for Phases 1-5,
-  where you're iterating on agent logic, not proving cloud integration.
+  every agent talks to a `BaseChatModel`, never to `ollama.Client`, `anthropic.Client`, or a
+  Snowflake connection directly. Swapping providers becomes a one-line change in a
+  `get_chat_model()` factory instead of a custom adapter class. This is "simplicity first" applied
+  to architecture: don't build an abstraction the framework already gives you for free — and it's
+  exactly what made adding a third provider here a five-line change, not a rewrite.
+- Ollama over the cloud free tiers (Gemini, Groq) because the hardware (RTX 5060 laptop GPU, 24GB
+  RAM) runs a small model fast, and local means zero cost forever with no account, rate limits, or
+  quota to track — the right tradeoff for a project centered on iterating and learning, not on
+  proving cloud-scale throughput. It also doubles as a look at local LLM deployment, which cloud
+  free tiers wouldn't teach.
+- Anthropic stays wired in (not removed) because a 3B local model will sometimes misclassify or
+  give shallow specialist answers — being able to flip `LLM_PROVIDER=anthropic` for a side-by-side
+  comparison is a genuinely useful debugging and learning tool, not just a production fallback.
 - Snowflake Cortex is deliberately deferred to exactly the one place the project requirement asks
   for it (Phase 6's "one cloud AI platform" call).
-- Model: default to `claude-sonnet-5` for agent reasoning (strong tool-use performance, current
-  generation, ~5x cheaper than Opus-tier per token) — this is a multi-agent system that will make
-  many calls per ticket, so per-token cost compounds. Reach for `claude-opus-5` only on a node
-  where reasoning quality is the bottleneck (e.g., a "hard case" escalation path), not by default.
 
-**Revisit if:** Cortex's LangChain integration turns out to lack a capability an agent needs
-(e.g., certain tool-calling features) — in that case Phase 6 may need a thin custom
-`BaseChatModel` subclass rather than the community one, but the factory-function seam stays the
-same either way.
+**What actually happened:** `llama3.2:3b` was the first default (it was already pulled locally).
+Live-testing the Research agent exposed a real grounding failure: given a prompt whose context
+*directly* contained the answer (the correct KB article, verified independently), the model still
+replied "I don't have that information." Not a code bug — the retrieved context and prompt were
+both confirmed correct. Pulled `llama3.1:8b` (~4.9GB, still free) and reran the identical prompt;
+it grounded correctly and gave the right answer. `llama3.1:8b` is now the default.
+
+**Revisit again if:** `llama3.1:8b` shows the same kind of failure on a harder prompt (e.g. a
+Diagnosis-agent case with noisier log context) — the fix is the same lever, a bigger local model
+(`qwen2.5:14b` is the next step up), before reaching for a paid default. Also revisit if Cortex's
+LangChain integration turns out to lack a capability an agent needs (e.g., certain tool-calling
+features) — in that case Phase 6 may need a thin custom `BaseChatModel` subclass rather than the
+community one, but the factory-function seam stays the same either way.
 
 ---
 
