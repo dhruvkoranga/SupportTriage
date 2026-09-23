@@ -154,14 +154,25 @@ elsewhere), but there's no reason to start a new project on it today.
 
 ## 7. MCP (Model Context Protocol)
 
-**Choice:** Official `mcp` Python SDK. Expose the **log-search tool** as an MCP server; consume
-it via an MCP client from the Diagnosis agent.
+**Choice:** Official `mcp` Python SDK, pinned to `2.2.0` (not `1.1.2` as originally guessed in
+`requirements.txt` before Phase 2 — see below). Expose the **log-search tool** as an MCP server
+(`support_triage/mcp_integration/server.py`); consume it via a synchronous MCP client
+(`support_triage/mcp_integration/client.py`) from the Diagnosis agent, spawned as a stdio
+subprocess.
 
 **Why log search specifically:** it's a clean, self-contained tool (one input: a query/filter;
 one output: matching log lines) that's genuinely useful to expose generically — a real MCP server
 you could plug into Claude Desktop or another MCP host, not just a toy example. The ticketing API
-and DB query tool stay as regular LangGraph/LangChain tools since the project only requires one
-MCP round-trip and those two are more naturally scoped to this agent graph specifically.
+and DB query tool stay as regular LangChain tools since the project only requires one MCP
+round-trip and those two are more naturally scoped to this agent graph specifically.
+
+**A version-pinning lesson worth keeping:** `requirements.txt` had guessed `mcp==1.1.2` back at
+project scaffolding, before any code existed. That version doesn't have `FastMCP` (the simple
+decorator-based server API) at all — it was added later, then **renamed to `MCPServer`** in the
+2.x line (`from mcp.server.mcpserver import MCPServer`, not `mcp.server.fastmcp`). Rather than
+trust a guessed pin or a possibly-stale tutorial, I installed the package fresh and introspected
+the actual installed classes (`inspect.signature(...)`) to confirm the real API before writing
+server/client code against it — the two are genuinely different APIs, not just a renamed import.
 
 ---
 
@@ -195,3 +206,28 @@ scope well beyond what's being demonstrated (and would violate the Simplicity Fi
 worth showing, just sized to the problem.
 
 **Revisit if:** this ever needs multiple distinct users/roles rather than one demo credential.
+
+---
+
+## 10. Which agents get a full tool-calling loop
+
+**Choice:** The Diagnosis agent gets a genuine agentic tool-calling loop
+(`support_triage/tool_loop.py`): the model is bound to two tools (log search, DB query) and
+decides for itself which one(s) to call, based on the ticket. The Escalation agent does **not**
+get this — it calls the ticketing API tools directly in fixed Python code (always `get_ticket`,
+always `add_internal_note`), then makes one plain LLM call to phrase the summary.
+
+**Alternatives considered:** Give every tool-using agent the same `bind_tools` + loop treatment,
+for consistency.
+
+**Why:** Diagnosis's job is genuinely open-ended — a ticket might need logs, might need order
+data, might need both, and which one is relevant isn't knowable in advance. That's exactly what
+tool-calling loops are for: letting the model decide. Escalation's job is a fixed procedure — look
+up the ticket, log why it was escalated, summarize for a human — every single time, regardless of
+ticket content. Giving it a tool-selection loop wouldn't add capability, only latency (extra model
+round-trips) and a new way for the model to skip a step it should always take. Not every agent
+needs the same amount of "agent" in it — this is the same lesson as Phase 1's escalation node not
+needing an LLM call at all, applied one level up.
+
+**Revisit if:** Escalation's procedure stops being fixed — e.g. if Phase 4 adds a case where it
+should conditionally check something else first. At that point it may earn a real tool loop too.

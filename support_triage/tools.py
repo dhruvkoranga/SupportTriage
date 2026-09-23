@@ -1,8 +1,8 @@
-"""Phase 1 tool stubs for the specialist agents.
+"""In-memory data and search functions for the Research and Diagnosis agents.
 
-Deliberately simple in-memory lookups. Phase 2 replaces these with real
-systems: a mock ticketing API, real log search, a DB query tool, and one
-tool exposed over MCP (see DECISIONS.md #7).
+search_logs is also the tool wrapped by the MCP server in mcp_integration/
+(see DECISIONS.md #7) — Diagnosis reaches it through that MCP round trip,
+not by importing this function directly.
 """
 
 import string
@@ -60,13 +60,3 @@ def search_logs(query: str) -> list[str]:
     """Keyword-match the query against recent log lines."""
     terms = _extract_terms(query)
     return [line for line in _LOGS if any(term in line.lower() for term in terms)]
-
-
-def draft_escalation_summary(ticket_text: str, reasoning: str) -> str:
-    """Build a human-readable summary for a ticket routed to escalation."""
-    return (
-        "ESCALATION REQUIRED\n"
-        f"Ticket: {ticket_text}\n"
-        f"Triage reasoning: {reasoning}\n"
-        "Action: awaiting human review before anything is done."
-    )

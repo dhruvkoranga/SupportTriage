@@ -22,11 +22,15 @@ Research    Diagnosis    Escalation
 ```
 
 - **Triage Agent** — classifies the incoming ticket and plans sub-tasks before routing.
-- **Research Agent** — retrieval-augmented generation over internal docs/knowledge base.
-- **Diagnosis Agent** — calls real tools: log search (via MCP), a mock DB query tool, a mock
-  ticketing API.
-- **Escalation Agent** — drafts a human-readable summary and pauses for human approval before any
-  high-risk action (e.g., closing a ticket).
+- **Research Agent** — retrieval over an internal knowledge base (keyword search for now; Chroma
+  RAG upgrade pending — see the note below).
+- **Diagnosis Agent** — a genuine tool-calling loop: decides for itself whether to search logs
+  (via a real MCP server/client round trip) or query the orders database (sqlite), based on the
+  ticket.
+- **Escalation Agent** — looks up the ticket via the mock ticketing API, logs an internal note,
+  and drafts a human-readable summary — pausing for human approval before any high-risk action
+  (e.g., closing a ticket or issuing a refund; those tools don't exist yet on purpose, see
+  [DECISIONS.md](DECISIONS.md#7-mcp-model-context-protocol)).
 
 See [DECISIONS.md](DECISIONS.md) for why each technology was chosen and what the alternatives
 were.
@@ -47,11 +51,11 @@ were.
 
 ## Phase roadmap
 
-- [ ] **Phase 1 — Core agent framework**: LangGraph wiring; Triage agent classifies and routes to
-      2-3 specialist agents with distinct tools.
-- [ ] **Phase 2 — Tool use**: mock ticketing API, log-search function, DB query tool; one tool
-      requiring structured function calling; one tool exposed as an MCP server + consumed via MCP
-      client.
+- [x] **Phase 1 — Core agent framework**: LangGraph wiring; Triage agent classifies and routes to
+      3 specialist agents with distinct tools.
+- [x] **Phase 2 — Tool use**: real sqlite DB query tool, mock ticketing API, structured
+      function-calling tool loop (Diagnosis agent chooses its own tools), log search exposed as a
+      real MCP server + consumed via MCP client.
 - [ ] **Phase 3 — Memory & planning**: multi-turn conversation state across the whole pipeline; a
       planning step that breaks a vague request into sub-tasks before acting.
 - [ ] **Phase 4 — Human-in-the-loop + guardrails**: Escalation agent pauses for human approval
@@ -84,12 +88,21 @@ No API key is required by default — LLM_PROVIDER=ollama runs entirely locally 
 LLM_PROVIDER=anthropic in .env (and add an ANTHROPIC_API_KEY) if you want to compare output
 quality against a paid model — see [DECISIONS.md](DECISIONS.md#2-llm-provider-strategy-dev-vs-production).
 
-> **Note:** the full `requirements.txt` includes `chromadb` (Phase 2), which needs Microsoft's
-> Visual C++ Build Tools to compile on Windows. Not needed until Phase 2 — install it before then.
+### Try it
 
-A `.env.example` will be added once Phase 1 introduces the first agent that needs a key — see
-[DECISIONS.md](DECISIONS.md) for how the LLM provider is kept swappable between Anthropic and
-Snowflake Cortex.
+```bash
+python -m support_triage.main "How do I reset a user's password?"
+python -m support_triage.main "Order 4821 payments keep timing out, what's going on?"
+python -m support_triage.main "Please cancel and refund order #55 immediately" T-1002
+```
+
+The third argument (ticket ID) is optional and only used by the Escalation path — it must match
+an existing entry in the mock ticketing store (`T-1001` or `T-1002`, see `ticketing.py`).
+
+> **Note:** the full `requirements.txt` includes `chromadb`, which needs Microsoft's Visual C++
+> Build Tools to compile on Windows. The Research agent's Chroma-backed RAG upgrade is
+> deliberately deferred until that's installed — it's not blocking any Phase 1 or 2 functionality
+> in the meantime, since Research currently uses plain keyword search.
 
 ## Suggested GitHub checkpoints
 
@@ -97,21 +110,21 @@ Each checkpoint below is a natural, self-contained, reviewable unit of work — 
 stop, review the diff together, and get a go-ahead for `git commit` / `git push` (Claude reviews
 and confirms readiness; you run the actual git commands — see [CLAUDE.md](CLAUDE.md#2-git-workflow)).
 
-1. **Project scaffold** *(this checkpoint)* — `CLAUDE.md`, `README.md`, `DECISIONS.md`,
-   `requirements.txt`, `.gitignore`. Nothing runs yet; this just establishes intent and decisions
-   before code exists.
-2. **Phase 1 complete** — Triage agent + specialist agents wired via LangGraph; a query can flow
-   end-to-end through the graph (even with simple/mocked agent logic).
-3. **Phase 2 complete** — real tool calls (ticketing API, log search, DB query) plus the MCP
-   server/client pair.
-4. **Phase 3 complete** — multi-turn state persists across a conversation; the planning step is
-   visible in agent output.
-5. **Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably blocking
-   an unconfirmed destructive action.
-6. **Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
-   visible for a sample run.
-7. **Phase 6 complete** — FastAPI backend serves the pipeline behind basic auth, with at least one
-   live Snowflake Cortex call, and logging in place.
+- [x] **1. Project scaffold** — `CLAUDE.md`, `README.md`, `DECISIONS.md`, `requirements.txt`,
+      `.gitignore`. Nothing runs yet; this just establishes intent and decisions before code
+      exists.
+- [x] **2. Phase 1 complete** — Triage agent + specialist agents wired via LangGraph; a query can
+      flow end-to-end through the graph.
+- [x] **3. Phase 2 complete** — real tool calls (ticketing API, log search, DB query) plus the MCP
+      server/client pair.
+- [ ] **4. Phase 3 complete** — multi-turn state persists across a conversation; the planning step
+      is visible in agent output.
+- [ ] **5. Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably
+      blocking an unconfirmed destructive action.
+- [ ] **6. Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
+      visible for a sample run.
+- [ ] **7. Phase 6 complete** — FastAPI backend serves the pipeline behind basic auth, with at
+      least one live Snowflake Cortex call, and logging in place.
 
 Within a large phase, feel free to commit sub-steps (e.g., "add Research agent" then "add
 Diagnosis agent") rather than waiting for the whole phase — smaller, reviewable diffs are

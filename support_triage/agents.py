@@ -1,10 +1,15 @@
 """Triage agent and the three specialist agents it routes to."""
 
+from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from support_triage.db import query_order_status
 from support_triage.llm import get_chat_model
+from support_triage.mcp_integration.client import search_logs_via_mcp
 from support_triage.state import Category, TriageState
-from support_triage.tools import draft_escalation_summary, search_knowledge_base, search_logs
+from support_triage.ticketing import add_internal_note, get_ticket
+from support_triage.tool_loop import run_tool_loop
+from support_triage.tools import search_knowledge_base
 
 TRIAGE_SYSTEM_PROMPT = """You triage incoming support tickets for an e-commerce platform. \
 Classify each ticket into exactly one category:
@@ -19,9 +24,27 @@ RESEARCH_SYSTEM_PROMPT = (
 )
 
 DIAGNOSIS_SYSTEM_PROMPT = (
-    "You are the Diagnosis agent. Explain what the log evidence below suggests is wrong, "
-    "in plain language a support engineer can act on. If no logs matched, say so."
+    "You are the Diagnosis agent. You have two tools: search_logs (recent system logs) "
+    "and query_order_status (the orders database). Use whichever are relevant to "
+    "investigate the ticket — extract IDs like an order number from the ticket text "
+    "yourself. Explain what you found in plain language. If nothing relevant turned up, "
+    "say so; don't guess."
 )
+
+ESCALATION_SYSTEM_PROMPT = (
+    "You are the Escalation agent. This ticket has been flagged as high-risk and "
+    "requires human approval before any action is taken (e.g. cancelling an order or "
+    "issuing a refund). Using the ticket system record below, write a concise summary "
+    "for the human reviewer: what the customer wants, why it was escalated, and what "
+    "decision they need to make. Do not claim the issue has been resolved — a human "
+    "still has to act."
+)
+
+
+@tool
+def search_logs(query: str) -> list[str]:
+    """Search recent system log lines for entries matching the query."""
+    return search_logs_via_mcp(query)
 
 
 class TriageClassification(BaseModel):
@@ -56,20 +79,34 @@ def research_node(state: TriageState) -> dict:
 
 
 def diagnosis_node(state: TriageState) -> dict:
-    findings = search_logs(state["ticket_text"])
-    context = "\n".join(findings) or "No matching log lines found."
-    llm = get_chat_model()
-    response = llm.invoke(
-        [
-            ("system", DIAGNOSIS_SYSTEM_PROMPT),
-            ("human", f"Ticket: {state['ticket_text']}\n\nLog search results:\n{context}"),
-        ]
-    )
-    return {"agent_output": response.content}
+    tools = [search_logs, query_order_status]
+    llm_with_tools = get_chat_model().bind_tools(tools)
+    messages = [
+        ("system", DIAGNOSIS_SYSTEM_PROMPT),
+        ("human", f"Ticket: {state['ticket_text']}"),
+    ]
+    answer = run_tool_loop(llm_with_tools, tools, messages)
+    return {"agent_output": answer}
 
 
 def escalation_node(state: TriageState) -> dict:
-    summary = draft_escalation_summary(
-        state["ticket_text"], state.get("classification_reasoning", "")
+    ticket_id = state["ticket_id"]
+    ticket_record = get_ticket.invoke({"ticket_id": ticket_id})
+    reasoning = state.get("classification_reasoning", "")
+    add_internal_note.invoke(
+        {"ticket_id": ticket_id, "note": f"Escalated by Triage agent: {reasoning}"}
     )
-    return {"agent_output": summary}
+
+    llm = get_chat_model()
+    response = llm.invoke(
+        [
+            ("system", ESCALATION_SYSTEM_PROMPT),
+            (
+                "human",
+                f"Ticket: {state['ticket_text']}\n\n"
+                f"Ticket system record:\n{ticket_record}\n\n"
+                f"Triage reasoning: {reasoning}",
+            ),
+        ]
+    )
+    return {"agent_output": response.content}

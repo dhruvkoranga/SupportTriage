@@ -13,6 +13,7 @@ class TriageState(TypedDict, total=False):
     """
 
     ticket_text: str
+    ticket_id: str
     category: Category
     classification_reasoning: str
     agent_output: str

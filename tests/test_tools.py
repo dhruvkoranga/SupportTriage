@@ -1,4 +1,4 @@
-from support_triage.tools import draft_escalation_summary, search_knowledge_base, search_logs
+from support_triage.tools import search_knowledge_base, search_logs
 
 
 def test_search_knowledge_base_finds_matching_article():
@@ -25,11 +25,3 @@ def test_search_logs_finds_matching_line():
 
 def test_search_logs_no_match():
     assert search_logs("xyzzy_nonexistent_term") == []
-
-
-def test_draft_escalation_summary_includes_ticket_and_reasoning():
-    summary = draft_escalation_summary(
-        "Please delete my account", "user requested an irreversible action"
-    )
-    assert "Please delete my account" in summary
-    assert "user requested an irreversible action" in summary

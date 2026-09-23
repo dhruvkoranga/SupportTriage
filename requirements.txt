@@ -15,9 +15,9 @@ langchain-ollama==0.2.3      # ChatOllama: free, runs models locally via the Oll
 langchain-anthropic==0.3.0   # ChatAnthropic: paid, used when LLM_PROVIDER=anthropic for higher-quality comparison runs
 
 # --- Phase 2: Tool use / MCP ---
-mcp==1.1.2                   # official Model Context Protocol SDK (server + client) for the log-search tool
-langchain-chroma==0.1.4      # Chroma vector store integration, for the Research agent's RAG-over-docs tool
-chromadb==0.5.20             # embedded vector database backing langchain-chroma
+mcp==2.2.0                   # official Model Context Protocol SDK (server + client) for the log-search tool
+langchain-chroma==0.1.4      # Chroma vector store integration, for the Research agent's RAG-over-docs tool (not yet installed — needs VC++ Build Tools, see README)
+chromadb==0.5.20             # embedded vector database backing langchain-chroma (not yet installed — see above)
 
 # --- Phase 3: Memory & planning ---
 langgraph-checkpoint-sqlite==2.0.1   # persists multi-turn conversation state across a LangGraph run, to a local SQLite file
