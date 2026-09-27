@@ -11,7 +11,9 @@ def test_route_after_triage_returns_category():
 
 
 def test_escalation_node_uses_ticket_record_and_logs_a_note(monkeypatch):
-    fake_llm = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content="Human review needed."))
+    no_proposal = SimpleNamespace(content="", tool_calls=[])
+    summary = SimpleNamespace(content="Human review needed.")
+    fake_llm = _ScriptedToolLLM([no_proposal, summary])
     monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)
 
     notes_before = len(_TICKETS["T-1001"]["notes"])
@@ -24,8 +26,70 @@ def test_escalation_node_uses_ticket_record_and_logs_a_note(monkeypatch):
     )
 
     assert result["agent_output"] == "Human review needed."
+    assert result["proposed_actions"] == []
     assert len(_TICKETS["T-1001"]["notes"]) == notes_before + 1
     assert "refund request" in _TICKETS["T-1001"]["notes"][-1]
+
+
+def test_escalation_node_captures_proposed_action_without_executing_it(monkeypatch):
+    proposal = SimpleNamespace(
+        content="",
+        tool_calls=[
+            {
+                "name": "issue_refund",
+                "args": {"order_id": "55", "amount_usd": 20.0, "reason": "duplicate charge"},
+                "id": "c1",
+            }
+        ],
+    )
+    summary = SimpleNamespace(content="Refund proposed, awaiting approval.")
+    fake_llm = _ScriptedToolLLM([proposal, summary])
+    monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)
+
+    result = escalation_node(
+        {
+            "ticket_text": "Please refund order #55, I was double charged",
+            "ticket_id": "T-1002",
+            "classification_reasoning": "refund request",
+        }
+    )
+
+    assert result["proposed_actions"] == [
+        {
+            "sub_task": "Please refund order #55, I was double charged",
+            "tool": "issue_refund",
+            "args": {"order_id": "55", "amount_usd": 20.0, "reason": "duplicate charge"},
+            "reason": "refund request",
+        }
+    ]
+
+
+def test_escalation_node_never_directly_invokes_destructive_tools(monkeypatch):
+    """The actual guardrail claim, tested rather than just asserted in a comment:
+    escalation_node captures a requested tool call as data — it never calls
+    .invoke() on the real tool. Only conversation.run_turn_node does that,
+    after a human approves (see DECISIONS.md #14). Verified via the tool's
+    real side effect (ticket status), since a LangChain StructuredTool is a
+    Pydantic model and can't have .invoke monkeypatched directly."""
+    proposal = SimpleNamespace(
+        content="",
+        tool_calls=[
+            {"name": "close_ticket", "args": {"ticket_id": "T-1001", "reason": "resolved"}, "id": "c1"}
+        ],
+    )
+    summary = SimpleNamespace(content="Closing proposed.")
+    fake_llm = _ScriptedToolLLM([proposal, summary])
+    monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)
+
+    escalation_node(
+        {
+            "ticket_text": "Please close this ticket",
+            "ticket_id": "T-1001",
+            "classification_reasoning": "resolved",
+        }
+    )
+
+    assert _TICKETS["T-1001"]["status"] == "open"
 
 
 class _ScriptedToolLLM:

@@ -8,6 +8,16 @@ from langgraph.graph.message import add_messages
 Category = Literal["research", "diagnosis", "escalation"]
 
 
+class ProposedAction(TypedDict):
+    """A destructive tool call the Escalation agent wants to make, captured
+    but never executed until a human approves it (see DECISIONS.md #14)."""
+
+    sub_task: str
+    tool: str
+    args: dict
+    reason: str
+
+
 class TriageState(TypedDict, total=False):
     """State for the core single-ticket pipeline (Triage -> one specialist).
 
@@ -22,6 +32,7 @@ class TriageState(TypedDict, total=False):
     category: Category
     classification_reasoning: str
     agent_output: str
+    proposed_actions: list[ProposedAction]
 
 
 class SubtaskResult(TypedDict):
@@ -52,16 +63,25 @@ class PlanningState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     sub_tasks: list[str]
     subtask_results: Annotated[list[SubtaskResult], operator.add]
+    proposed_actions: Annotated[list[ProposedAction], operator.add]
     final_summary: str
 
 
 class ConversationState(TypedDict, total=False):
     """State for the outer, checkpointed graph — the real multi-turn memory.
 
-    Deliberately minimal: only what should actually persist for the life of
-    a conversation. Per-turn scratch work (sub_tasks, subtask_results) stays
-    out of this schema entirely — see PlanningState's docstring.
+    ``pending_summary``/``pending_actions`` are NOT reducer fields — each
+    turn's run_pipeline_node plainly overwrites them, so unlike PlanningState
+    (see its docstring), there's no accumulation-across-turns risk here.
+    They exist to let the graph split into two nodes: run_pipeline_node
+    (expensive, calls the LLM pipeline) and approve_and_finalize_node (calls
+    interrupt()). On resume, LangGraph only re-runs the node that actually
+    called interrupt() — if both steps lived in one node, resuming would
+    silently re-run the entire expensive pipeline from scratch just to reach
+    the interrupt() call again (found live — see DECISIONS.md #14).
     """
 
     ticket_id: str
     messages: Annotated[list, add_messages]
+    pending_summary: str
+    pending_actions: list[ProposedAction]

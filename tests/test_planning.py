@@ -38,7 +38,9 @@ def test_plan_node_uses_structured_output(monkeypatch):
 def test_run_subtask_node_wraps_core_graph_result(monkeypatch):
     fake_llm = SimpleNamespace(
         with_structured_output=lambda _schema: SimpleNamespace(
-            invoke=lambda _messages: TriageClassification(category="research", reasoning="how-to")
+            invoke=lambda _messages: TriageClassification(
+                category="research", confident=True, reasoning="how-to"
+            )
         ),
         invoke=lambda _messages: SimpleNamespace(content="Here's how."),
     )
@@ -49,6 +51,7 @@ def test_run_subtask_node_wraps_core_graph_result(monkeypatch):
     assert result["subtask_results"] == [
         {"sub_task": "How do I do X?", "category": "research", "agent_output": "Here's how."}
     ]
+    assert result["proposed_actions"] == []
 
 
 def test_aggregate_node_single_result_skips_llm_call():

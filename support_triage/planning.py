@@ -71,7 +71,8 @@ def run_subtask_node(state: dict) -> dict:
                 "category": core_result["category"],
                 "agent_output": core_result["agent_output"],
             }
-        ]
+        ],
+        "proposed_actions": core_result.get("proposed_actions") or [],
     }
 
 

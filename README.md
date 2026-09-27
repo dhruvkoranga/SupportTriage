@@ -31,15 +31,19 @@ Research    Diagnosis    Escalation      <- Triage classifies each sub-task
 - **Diagnosis Agent** — a genuine tool-calling loop: decides for itself whether to search logs
   (via a real MCP server/client round trip) or query the orders database (sqlite), based on the
   ticket.
-- **Escalation Agent** — looks up the ticket via the mock ticketing API, logs an internal note,
-  and drafts a human-readable summary — pausing for human approval before any high-risk action
-  (e.g., closing a ticket or issuing a refund; those tools don't exist yet on purpose, see
-  [DECISIONS.md](DECISIONS.md#7-mcp-model-context-protocol)).
+- **Escalation Agent** — looks up the ticket, logs an internal note, and *proposes* a destructive
+  action (closing a ticket, issuing a refund) if the ticket clearly warrants one — but never
+  executes it. The only code that actually calls those tools is a separate approval step, gated
+  behind a real human decision (see [DECISIONS.md](DECISIONS.md#14-human-approval-propose-dont-execute-and-where-interrupt-actually-has-to-live)).
+  A ticket the Triage agent isn't confident about is also routed here automatically, even if
+  nothing about it looks high-risk — abstaining and asking a human beats guessing.
 
 Conversation memory persists per `ticket_id`, across separate runs — the whole pipeline above runs
 once per turn, wrapped by an outer graph that owns only the conversation history (see
 [DECISIONS.md](DECISIONS.md#11-planningmemory-architecture-two-graphs-not-one) for why this is two
-graphs, not one).
+graphs, not one). If Escalation proposed a destructive action, that same outer graph pauses the
+entire conversation — via a real LangGraph `interrupt()`, not a prompt asking the model to hold
+off — until a human approves or rejects it.
 
 See [DECISIONS.md](DECISIONS.md) for why each technology was chosen and what the alternatives
 were.
@@ -56,6 +60,7 @@ were.
 | Tool protocol | MCP (log-search tool) + direct LangChain tools (ticketing API, DB query) |
 | Multi-turn memory | LangGraph `SqliteSaver` checkpointer, keyed by `ticket_id` |
 | Sub-task fan-out | LangGraph `Send` API (parallel branches, `operator.add` reducer to merge) |
+| Human approval | LangGraph `interrupt()`/`Command(resume=...)`, pausing the checkpointed graph |
 | API layer | FastAPI |
 | Evaluation | RAGAS (retrieval) + custom trajectory evaluation (tool-call correctness) |
 | Tracing | LangSmith |
@@ -70,9 +75,10 @@ were.
 - [x] **Phase 3 — Memory & planning**: multi-turn conversation state persisted per ticket via a
       LangGraph checkpointer; a Planning agent that breaks a message into sub-tasks, run in
       parallel via the `Send` API and combined by an Aggregate step.
-- [ ] **Phase 4 — Human-in-the-loop + guardrails**: Escalation agent pauses for human approval
-      before high-risk actions; guardrails block destructive actions without confirmation; the
-      agent can say "I'm not confident, escalating to human."
+- [x] **Phase 4 — Human-in-the-loop + guardrails**: the conversation pauses for real human approval
+      (LangGraph `interrupt()`) before any destructive action; the tools that action only ever get
+      called from that one approval step, never from the agent that proposes them; low-confidence
+      tickets are automatically escalated rather than guessed at.
 - [ ] **Phase 5 — Evaluation & observability**: RAGAS/LLM-as-judge for retrieval; trajectory
       evaluation for the agent; LangSmith tracing.
 - [ ] **Phase 6 — Production shape**: FastAPI backend; Snowflake Cortex for at least one model
@@ -122,6 +128,13 @@ A multi-part message ("How do I reset a password, and also what's the status of 
 gets split by the Planning agent into separate sub-tasks, each triaged independently, then
 combined into one reply.
 
+A high-risk request pauses for your approval before anything happens:
+
+```bash
+python -m support_triage.main "Please refund order 55 for $20, I was double charged" T-1002
+# -> shows the proposed action and asks "Approve? (y/n):" before issue_refund ever runs
+```
+
 > **Note:** the full `requirements.txt` includes `chromadb`, which needs Microsoft's Visual C++
 > Build Tools to compile on Windows. The Research agent's Chroma-backed RAG upgrade is
 > deliberately deferred until that's installed — it's not blocking any Phase 1 or 2 functionality
@@ -142,7 +155,7 @@ and confirms readiness; you run the actual git commands — see [CLAUDE.md](CLAU
       server/client pair.
 - [x] **4. Phase 3 complete** — multi-turn state persists across a conversation; the planning step
       is visible in agent output.
-- [ ] **5. Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably
+- [x] **5. Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably
       blocking an unconfirmed destructive action.
 - [ ] **6. Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
       visible for a sample run.

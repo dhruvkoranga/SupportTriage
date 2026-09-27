@@ -17,7 +17,9 @@ def test_turn_graph_single_subtask_skips_aggregate_llm_call(monkeypatch):
 
     fake_agent_llm = SimpleNamespace(
         with_structured_output=lambda _schema: SimpleNamespace(
-            invoke=lambda _messages: TriageClassification(category="research", reasoning="how-to")
+            invoke=lambda _messages: TriageClassification(
+                category="research", confident=True, reasoning="how-to"
+            )
         ),
         invoke=lambda _messages: SimpleNamespace(content="the answer"),
     )
@@ -41,7 +43,9 @@ def test_turn_graph_fans_out_over_multiple_subtasks(monkeypatch):
 
     fake_agent_llm = SimpleNamespace(
         with_structured_output=lambda _schema: SimpleNamespace(
-            invoke=lambda _messages: TriageClassification(category="research", reasoning="how-to")
+            invoke=lambda _messages: TriageClassification(
+                category="research", confident=True, reasoning="how-to"
+            )
         ),
         invoke=lambda _messages: SimpleNamespace(content="an answer"),
     )

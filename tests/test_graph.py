@@ -25,7 +25,9 @@ class _FakeChatModel:
 
 def test_graph_routes_research_ticket_to_research_node(monkeypatch):
     fake_llm = _FakeChatModel(
-        structured_result=TriageClassification(category="research", reasoning="how-to question"),
+        structured_result=TriageClassification(
+            category="research", confident=True, reasoning="how-to question"
+        ),
         text_content="Here is how you do it.",
     )
     monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)
@@ -38,9 +40,15 @@ def test_graph_routes_research_ticket_to_research_node(monkeypatch):
 
 
 def test_graph_routes_escalation_ticket_and_uses_ticketing_tool(monkeypatch):
+    # One queued tool_loop response: the "no destructive action proposed"
+    # reply to escalation_node's bind_tools() proposal step.
+    no_proposal = SimpleNamespace(content="", tool_calls=[])
     fake_llm = _FakeChatModel(
-        structured_result=TriageClassification(category="escalation", reasoning="refund request"),
+        structured_result=TriageClassification(
+            category="escalation", confident=True, reasoning="refund request"
+        ),
         text_content="Human review needed before this refund proceeds.",
+        tool_loop_responses=[no_proposal],
     )
     monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)
 
@@ -51,6 +59,7 @@ def test_graph_routes_escalation_ticket_and_uses_ticketing_tool(monkeypatch):
 
     assert result["category"] == "escalation"
     assert result["agent_output"] == "Human review needed before this refund proceeds."
+    assert result["proposed_actions"] == []
 
 
 def test_graph_routes_diagnosis_ticket_through_tool_loop(monkeypatch):
@@ -60,7 +69,9 @@ def test_graph_routes_diagnosis_ticket_through_tool_loop(monkeypatch):
     )
     final = SimpleNamespace(content="Order 4821 is stuck in PROCESSING.", tool_calls=[])
     fake_llm = _FakeChatModel(
-        structured_result=TriageClassification(category="diagnosis", reasoning="bug report"),
+        structured_result=TriageClassification(
+            category="diagnosis", confident=True, reasoning="bug report"
+        ),
         tool_loop_responses=[tool_call, final],
     )
     monkeypatch.setattr(agents_module, "get_chat_model", lambda: fake_llm)

@@ -310,3 +310,115 @@ redefining `diagnosis` positively ("anything about a specific order/account — 
 status lookups, not just things that are broken") instead of relying on the model to infer that a
 lookup implicitly belongs there. This kind of gap is exactly what Phase 5's evaluation harness is
 meant to catch systematically, rather than one hand-run example at a time.
+
+---
+
+## 14. Human approval: propose-don't-execute, and where interrupt() actually has to live
+
+**Choice:** `close_ticket` and `issue_refund` exist as real tools (`ticketing.py`), but
+`escalation_node` never calls them — it only reads the model's requested tool call (name + args)
+off the response and returns it as a `ProposedAction`. The only code in the entire project that
+ever calls `.invoke()` on these two tools is `conversation.py`'s `approve_and_finalize_node`, and
+only after a human approves via a real LangGraph `interrupt()`.
+
+**Why "propose, don't execute" is a code-level guardrail, not a prompt-level one:** the system
+prompt also tells the model not to call these tools speculatively — but a prompt is a request, not
+a constraint; models don't always follow instructions. The actual guarantee here doesn't depend on
+the model behaving: even if the model's `tool_calls` field contains a destructive request,
+`escalation_node`'s code has no line anywhere that would execute it. There is exactly one call
+site for these tools in the whole codebase, and it's gated behind `interrupt()`. Tested directly,
+not just asserted — see `test_escalation_node_never_directly_invokes_destructive_tools` and the
+approve/reject tests in `test_conversation_graph.py`.
+
+**Where interrupt() has to be called — a real finding, verified empirically:** `escalation_node`
+runs several nesting levels below the checkpointed graph (`conversation_graph` → `run_pipeline_node`
+→ the uncheckpointed turn graph → the uncheckpointed core graph → `escalation_node`). Calling
+`interrupt()` *while* that nested chain is still executing does correctly pause the whole call
+stack (the exception propagates through plain `.invoke()` calls like any Python exception) — but
+**resuming it does not work**: `Command(resume=...)` only works for a node that belongs directly
+to the graph holding the checkpointer. A node several `.invoke()` calls deep has no way to resume
+mid-function; each nested call starts a brand-new, memoryless execution every time. Verified with a
+minimal repro before writing any real code (see the three empirical smoke tests run for this
+phase). The fix: the nested pipeline only ever returns *data* (a `ProposedAction`, never a paused
+state) — `interrupt()` itself is called directly inside `approve_and_finalize_node`, a real node of
+the checkpointed `conversation_graph`, after the nested work has already fully returned.
+
+**Revisit if:** a future phase needs an approval gate to pause *mid-investigation* rather than
+after it completes (e.g., "should I even look at this order?") — that would need the interrupt to
+live inside the nested pipeline itself, which this project's structure specifically doesn't
+support, and would need a different design (e.g., giving the inner graph its own checkpointer too).
+
+---
+
+## 15. A second real bug: resuming re-ran the entire pipeline
+
+**What happened:** The first version of `run_turn_node` did the expensive nested pipeline call
+*and* the `interrupt()` call in the same node. That's the version described in #14 as broken for a
+different reason than expected: live-testing showed that approving a proposal caused the **entire
+multi-agent pipeline to run a second time** — Planning, Triage, and every specialist agent, all
+over again — before the approval was even processed. Worse, on one run this doubled LLM call chain
+hit a real transient failure (a `with_structured_output()` call returned `None`), crashing the
+approval step entirely.
+
+**Root cause:** LangGraph resumes a node by re-executing its *whole function* from the top — the
+resume value is threaded back in only at the specific `interrupt()` call site. If everything
+before that call site is expensive and non-deterministic (an LLM pipeline), resuming pays for it
+again, and there's no guarantee the second run produces the same proposal the human actually
+approved.
+
+**Fix:** split the one node into two — `run_pipeline_node` (runs the nested pipeline, stages its
+result in plain, non-reducer `ConversationState` fields) and `approve_and_finalize_node` (reads
+the staged result, calls `interrupt()`, executes on approval). LangGraph only re-executes the node
+that was actually interrupted; the pipeline node already completed and its output was already
+checkpointed, so it never re-runs. Verified with an isolated repro before touching the real code,
+then locked in with a regression test asserting the pipeline function is called exactly once
+across a full pause/approve/resume cycle.
+
+**The general lesson (a sibling to #12's):** anything expensive or non-deterministic must complete
+and be safely checkpointed *before* a node calls `interrupt()`, in an earlier node — never
+alongside it in the same one. `interrupt()` marks a true "pause here, resume here" boundary only
+for whatever's in its own node; anything upstream, resume pays for all over again.
+
+---
+
+## 16. A LangGraph gotcha worth remembering: `Command(resume=False)` doesn't work
+
+**What happened:** `Command(resume=True)` worked immediately; `Command(resume=False)` raised
+`EmptyInputError: Received empty Command input` — a rejection couldn't even be submitted.
+
+**Root cause:** `langgraph/pregel/io.py`'s `map_command` checks `if cmd.resume:` (a truthy check),
+not `if cmd.resume is not None:`. A bare `False` is falsy, so it's silently treated as "no resume
+value provided at all," not as "resume with the value `False`." Confirmed directly against the
+installed package's source, not guessed — see `test_command_resume_with_bare_false_is_a_known_langgraph_pitfall`.
+
+**Fix:** resume with a non-empty dict instead of a bare bool — `Command(resume={"approved": False})`
+is truthy regardless of what's inside it, so it survives the check. `approve_and_finalize_node`
+unpacks `decision["approved"]` rather than using `interrupt()`'s return value directly.
+
+**Revisit if:** upgrading `langgraph` past this pinned version — if the upstream check is ever
+fixed to `is not None`, the dict wrapper becomes unnecessary (harmless to keep, but removable).
+
+---
+
+## 17. Abstention: a `confident` field, not a separate mechanism
+
+**Choice:** `TriageClassification` gets a `confident: bool` field. When `False`, `triage_node`
+overrides the category to `escalation` regardless of what the model predicted — reusing the
+*existing* Escalation path rather than building a separate "uncertain" flow.
+
+**Why:** routing low-confidence tickets to Escalation is a genuine "abstain and let a human decide"
+behavior, but it doesn't need new machinery — Escalation already means "a human looks at this
+before anything happens." Since `escalation_node` only proposes a destructive tool call when the
+ticket clearly warrants one, a genuinely ambiguous ticket naturally produces zero proposed actions
+and just falls through to a plain summary — the right behavior, achieved without escalation_node
+needing to know or care *why* it was invoked.
+
+**A known rough edge, left as-is rather than chased:** live-testing an intentionally vague ticket
+("I have a problem," on a ticket record about a payment failure) showed the model *did* propose
+`close_ticket` — a more confident action than the vague complaint actually justified, despite the
+system prompt saying only to propose an action when the request is explicit. This didn't break
+anything: the system still paused, a human still had to approve, and rejecting it left nothing
+changed — which is the entire point of the guardrail in #14. It's a reminder that a guardrail's
+job is to catch imperfect upstream judgment, not to assume the judgment upstream is already
+correct. Tightening this further is exactly the kind of thing Phase 5's evaluation work is for,
+not something worth hand-chasing example by example (same conclusion as #13).

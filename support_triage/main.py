@@ -17,6 +17,7 @@ import sys
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 
 from support_triage.conversation_graph import build_conversation_graph
 
@@ -24,10 +25,27 @@ _DEFAULT_TICKET_ID = "T-1001"
 _CHECKPOINT_DB = "support_triage_checkpoints.sqlite3"
 
 
+def _ask_approval(payload: dict) -> bool:
+    print("\n--- Human approval required before this can proceed ---")
+    print(payload["draft_summary"])
+    print("\nProposed action(s):")
+    for action in payload["proposed_actions"]:
+        print(f"  - {action['tool']}({action['args']}) — {action['reason']}")
+    answer = input("\nApprove? (y/n): ").strip().lower()
+    return answer in {"y", "yes"}
+
+
 def _run_turn(graph, config: dict, ticket_id: str, ticket_text: str) -> str:
-    result = graph.invoke(
-        {"ticket_id": ticket_id, "messages": [("human", ticket_text)]}, config
-    )
+    result = graph.invoke({"ticket_id": ticket_id, "messages": [("human", ticket_text)]}, config)
+
+    snapshot = graph.get_state(config)
+    while snapshot.next:
+        payload = snapshot.tasks[0].interrupts[0].value
+        approved = _ask_approval(payload)
+        # {"approved": bool}, not a bare bool — see conversation.py's run_turn_node.
+        result = graph.invoke(Command(resume={"approved": approved}), config)
+        snapshot = graph.get_state(config)
+
     return result["messages"][-1].content
 
 
