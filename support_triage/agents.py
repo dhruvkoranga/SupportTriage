@@ -13,8 +13,10 @@ from support_triage.tools import search_knowledge_base
 
 TRIAGE_SYSTEM_PROMPT = """You triage incoming support tickets for an e-commerce platform. \
 Classify each ticket into exactly one category:
-- research: a how-to or documentation question; nothing is broken
-- diagnosis: something is broken or behaving unexpectedly and needs investigation
+- research: a how-to or documentation question about how the platform works in general; \
+no specific order or account is involved
+- diagnosis: anything about a specific order, account, or transaction — including plain \
+status lookups ("what's the status of order X"), not just things that are broken
 - escalation: a high-risk request (cancel, refund, delete) or anything urgent enough \
 to need a human before acting"""
 

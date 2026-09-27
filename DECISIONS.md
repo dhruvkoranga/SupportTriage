@@ -231,3 +231,82 @@ needing an LLM call at all, applied one level up.
 
 **Revisit if:** Escalation's procedure stops being fixed — e.g. if Phase 4 adds a case where it
 should conditionally check something else first. At that point it may earn a real tool loop too.
+
+---
+
+## 11. Planning/memory architecture: two graphs, not one
+
+**Choice:** Phase 3 is two separate compiled graphs, not one. An **inner "turn" graph**
+(`planning_graph.py`: plan -> fan-out over sub-tasks via LangGraph's `Send` API -> aggregate) is
+compiled **without** a checkpointer and reuses the entire Phase 1/2 pipeline
+(`support_triage/graph.py`, `TriageState`) unchanged, invoked as a black box once per sub-task. An
+**outer "conversation" graph** (`conversation_graph.py`: a single node wrapping the inner graph)
+is compiled **with** a checkpointer and owns the only thing that should actually persist across
+turns: `messages`.
+
+**Alternatives considered:** One flat graph with everything (planning, fan-out, aggregation, and
+memory) in a single checkpointed `StateGraph`.
+
+**Why:** The core Triage -> specialist pipeline from Phase 1/2 already works and is already
+tested — reusing it as an opaque function call (`core_graph.invoke(...)`) inside
+`run_subtask_node` means Phase 3 adds zero risk of regressing it, and keeps the fan-out logic from
+needing to know anything about triage/specialist internals. Splitting the checkpointing boundary
+this way — rather than checkpointing one big flat state — is what makes per-turn scratch fields
+(`sub_tasks`, `subtask_results`) safe to use `Annotated[..., operator.add]` reducers on: the
+inner graph never persists between calls, so there's nothing for those reducers to leak *into*
+across turns. See #12 for what happens when you get this wrong.
+
+**Revisit if:** the inner turn graph needs its own multi-step memory (e.g. a sub-task that
+depends on a previous sub-task's result within the same turn) — at that point it might warrant a
+proper LangGraph subgraph composition instead of a plain function call.
+
+---
+
+## 12. A real bug: reducer fields need a boundary that resets them
+
+**What happened:** The first version of Phase 3 was the one-flat-graph design from #11's
+"alternatives considered" — `PlanningState` had `messages`, `sub_tasks`, and `subtask_results` all
+in the same checkpointed schema. Turn 1 (single ticket) worked fine. Turn 2, in the *same*
+conversation thread, produced a summary that mixed in details from Turn 1's ticket that were never
+mentioned in Turn 2 at all — reproducible every time, not model noise.
+
+**Root cause:** `subtask_results: Annotated[list[SubtaskResult], operator.add]` needs to
+accumulate *within* one turn, to correctly merge the results of concurrent `Send`-spawned
+branches. But a reducer only ever combines — it has no notion of "start fresh here." Since the
+checkpointer persists the whole schema for the life of the thread, Turn 1's `subtask_results`
+were still sitting in state when Turn 2's fan-out ran, and Turn 2 silently appended to them instead
+of starting empty. `aggregate_node` then summarized *both* turns' results as if they belonged to
+one request.
+
+**Fix:** Moved `sub_tasks` / `subtask_results` out of the checkpointed schema entirely, into the
+inner turn graph's state (#11), which never persists between calls — there's nothing left to leak
+because nothing survives past one `.invoke()`. `messages` stays in the outer, checkpointed schema,
+where accumulating forever is exactly the correct behavior.
+
+**The general lesson:** a reducer field is safe to checkpoint only if "accumulate forever" is
+actually the behavior you want for that field's entire lifetime. If a field is really per-turn (or
+per-request, or per-anything-shorter-than-the-checkpoint's-lifetime) scratch space, it belongs in
+a boundary that gets torn down and rebuilt each time — an uncheckpointed subgraph invocation, not
+a field in the persisted schema.
+
+---
+
+## 13. Two smaller Phase 3 findings worth remembering
+
+**Rephrasing a question into a command silently changed its triage category.** The Planning
+node's job is to rewrite a ticket into self-contained sub-tasks — its first version rewrote "How
+do I reset a user's password?" into "Reset a user's password." Same request, but an imperative
+sentence reads as a command to *act*, not a question to *answer*, and Triage consistently (not
+randomly) classified it as `escalation` instead of `research`. Fixed by explicitly instructing the
+Planning prompt to preserve the original phrasing's mood (question stays a question). Small
+wording choices in an intermediate agent's output can change a downstream agent's behavior in
+ways that have nothing to do with either prompt being "wrong" in isolation.
+
+**A category definition that only covers the negative case invites inconsistent classification.**
+The original `diagnosis` category was defined as "something is broken" — but a plain status
+lookup ("what's the status of order 55?") doesn't say anything is broken, so the model
+inconsistently split between `diagnosis` and `research` on identical repeated input. Fixed by
+redefining `diagnosis` positively ("anything about a specific order/account — including plain
+status lookups, not just things that are broken") instead of relying on the model to infer that a
+lookup implicitly belongs there. This kind of gap is exactly what Phase 5's evaluation harness is
+meant to catch systematically, rather than one hand-run example at a time.

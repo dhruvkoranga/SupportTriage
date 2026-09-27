@@ -1,36 +1,67 @@
-"""Manual CLI entry point: run a single ticket through the triage graph.
+"""CLI entry point: the multi-turn conversation graph (Plan -> triage each
+sub-task -> aggregate), with memory persisted per ticket_id.
 
 Usage:
-    python -m support_triage.main "My order has been stuck in PROCESSING for 3 days" [ticket_id]
+    # Single-shot: one ticket, one turn
+    python -m support_triage.main "Order 4821 seems stuck, what's wrong?" [ticket_id]
 
-ticket_id defaults to T-1001, a ticket that already exists in the mock
-ticketing store (see ticketing.py) — only used by the Escalation path.
+    # Interactive: multi-turn conversation, memory persists across inputs
+    python -m support_triage.main
+
+ticket_id doubles as the conversation's thread_id, so re-running a single
+ticket with the same ticket_id continues that ticket's conversation.
+Defaults to T-1001, a ticket that already exists in ticketing.py.
 """
 
 import sys
 
 from dotenv import load_dotenv
+from langgraph.checkpoint.sqlite import SqliteSaver
 
-from support_triage.graph import build_graph
+from support_triage.conversation_graph import build_conversation_graph
 
 _DEFAULT_TICKET_ID = "T-1001"
+_CHECKPOINT_DB = "support_triage_checkpoints.sqlite3"
+
+
+def _run_turn(graph, config: dict, ticket_id: str, ticket_text: str) -> str:
+    result = graph.invoke(
+        {"ticket_id": ticket_id, "messages": [("human", ticket_text)]}, config
+    )
+    return result["messages"][-1].content
+
+
+def _run_single_shot(ticket_text: str, ticket_id: str) -> None:
+    with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+        graph = build_conversation_graph(checkpointer)
+        config = {"configurable": {"thread_id": ticket_id}}
+        print(_run_turn(graph, config, ticket_id, ticket_text))
+
+
+def _run_interactive() -> None:
+    ticket_id = input(f"Ticket ID [{_DEFAULT_TICKET_ID}]: ").strip() or _DEFAULT_TICKET_ID
+    print(f"Starting conversation for ticket {ticket_id}. Type 'exit' to quit.\n")
+
+    with SqliteSaver.from_conn_string(_CHECKPOINT_DB) as checkpointer:
+        graph = build_conversation_graph(checkpointer)
+        config = {"configurable": {"thread_id": ticket_id}}
+
+        while True:
+            ticket_text = input("You: ").strip()
+            if ticket_text.lower() in {"exit", "quit"}:
+                break
+            print(f"\nAgent: {_run_turn(graph, config, ticket_id, ticket_text)}\n")
 
 
 def main() -> None:
     load_dotenv()
     if len(sys.argv) < 2:
-        print('Usage: python -m support_triage.main "<ticket text>" [ticket_id]')
-        raise SystemExit(1)
+        _run_interactive()
+        return
 
     ticket_text = sys.argv[1]
     ticket_id = sys.argv[2] if len(sys.argv) > 2 else _DEFAULT_TICKET_ID
-    graph = build_graph()
-    result = graph.invoke({"ticket_text": ticket_text, "ticket_id": ticket_id})
-
-    print(f"Category: {result['category']}")
-    print(f"Reasoning: {result['classification_reasoning']}")
-    print("---")
-    print(result["agent_output"])
+    _run_single_shot(ticket_text, ticket_id)
 
 
 if __name__ == "__main__":

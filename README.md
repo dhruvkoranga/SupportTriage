@@ -8,20 +8,24 @@ approval. Built with evaluation and guardrails from day one, not bolted on at th
 ## Architecture
 
 ```
-User query (bug report / support ticket)
+Conversation turn (persisted memory, keyed by ticket_id)
         |
-   Triage Agent (classifies & routes)
+   Planning Agent (breaks the message into sub-tasks)
+        |
+   fan-out (one branch per sub-task, run in parallel)
         |
    +----+----+-------------+
-Research    Diagnosis    Escalation
- Agent       Agent         Agent
+Research    Diagnosis    Escalation      <- Triage classifies each sub-task
+ Agent       Agent         Agent            into one of these three, per branch
    |            |             |
-(RAG over    (calls tools:   (drafts summary,
- docs/KB)     logs, DB       requests human
-              query, API)    approval)
+   +----+----+-------------+
+        |
+   Aggregate (combine sub-task results into one reply)
 ```
 
-- **Triage Agent** — classifies the incoming ticket and plans sub-tasks before routing.
+- **Planning Agent** — breaks a message into one or more self-contained sub-tasks (most messages
+  are a single sub-task; only genuinely multi-part requests split further).
+- **Triage Agent** — classifies each sub-task and routes it, run once per sub-task.
 - **Research Agent** — retrieval over an internal knowledge base (keyword search for now; Chroma
   RAG upgrade pending — see the note below).
 - **Diagnosis Agent** — a genuine tool-calling loop: decides for itself whether to search logs
@@ -31,6 +35,11 @@ Research    Diagnosis    Escalation
   and drafts a human-readable summary — pausing for human approval before any high-risk action
   (e.g., closing a ticket or issuing a refund; those tools don't exist yet on purpose, see
   [DECISIONS.md](DECISIONS.md#7-mcp-model-context-protocol)).
+
+Conversation memory persists per `ticket_id`, across separate runs — the whole pipeline above runs
+once per turn, wrapped by an outer graph that owns only the conversation history (see
+[DECISIONS.md](DECISIONS.md#11-planningmemory-architecture-two-graphs-not-one) for why this is two
+graphs, not one).
 
 See [DECISIONS.md](DECISIONS.md) for why each technology was chosen and what the alternatives
 were.
@@ -45,6 +54,8 @@ were.
 | LLM (prod, Phase 6) | Snowflake Cortex via `langchain-community` |
 | RAG vector store | Chroma |
 | Tool protocol | MCP (log-search tool) + direct LangChain tools (ticketing API, DB query) |
+| Multi-turn memory | LangGraph `SqliteSaver` checkpointer, keyed by `ticket_id` |
+| Sub-task fan-out | LangGraph `Send` API (parallel branches, `operator.add` reducer to merge) |
 | API layer | FastAPI |
 | Evaluation | RAGAS (retrieval) + custom trajectory evaluation (tool-call correctness) |
 | Tracing | LangSmith |
@@ -56,8 +67,9 @@ were.
 - [x] **Phase 2 — Tool use**: real sqlite DB query tool, mock ticketing API, structured
       function-calling tool loop (Diagnosis agent chooses its own tools), log search exposed as a
       real MCP server + consumed via MCP client.
-- [ ] **Phase 3 — Memory & planning**: multi-turn conversation state across the whole pipeline; a
-      planning step that breaks a vague request into sub-tasks before acting.
+- [x] **Phase 3 — Memory & planning**: multi-turn conversation state persisted per ticket via a
+      LangGraph checkpointer; a Planning agent that breaks a message into sub-tasks, run in
+      parallel via the `Send` API and combined by an Aggregate step.
 - [ ] **Phase 4 — Human-in-the-loop + guardrails**: Escalation agent pauses for human approval
       before high-risk actions; guardrails block destructive actions without confirmation; the
       agent can say "I'm not confident, escalating to human."
@@ -91,13 +103,24 @@ quality against a paid model — see [DECISIONS.md](DECISIONS.md#2-llm-provider-
 ### Try it
 
 ```bash
+# Single-shot: one message, one reply. The optional second argument is the
+# ticket ID, which doubles as the conversation's thread ID (defaults to T-1001).
 python -m support_triage.main "How do I reset a user's password?"
 python -m support_triage.main "Order 4821 payments keep timing out, what's going on?"
 python -m support_triage.main "Please cancel and refund order #55 immediately" T-1002
+
+# Re-running the same ticket ID continues that ticket's conversation —
+# memory persists across separate CLI invocations, not just within one process:
+python -m support_triage.main "What is the status of order 4821?" T-1002
+python -m support_triage.main "What about order 55 instead?" T-1002   # resolves "instead" using turn 1's context
+
+# Interactive: multi-turn conversation in one session (type 'exit' to quit)
+python -m support_triage.main
 ```
 
-The third argument (ticket ID) is optional and only used by the Escalation path — it must match
-an existing entry in the mock ticketing store (`T-1001` or `T-1002`, see `ticketing.py`).
+A multi-part message ("How do I reset a password, and also what's the status of order 4821?")
+gets split by the Planning agent into separate sub-tasks, each triaged independently, then
+combined into one reply.
 
 > **Note:** the full `requirements.txt` includes `chromadb`, which needs Microsoft's Visual C++
 > Build Tools to compile on Windows. The Research agent's Chroma-backed RAG upgrade is
@@ -117,7 +140,7 @@ and confirms readiness; you run the actual git commands — see [CLAUDE.md](CLAU
       flow end-to-end through the graph.
 - [x] **3. Phase 2 complete** — real tool calls (ticketing API, log search, DB query) plus the MCP
       server/client pair.
-- [ ] **4. Phase 3 complete** — multi-turn state persists across a conversation; the planning step
+- [x] **4. Phase 3 complete** — multi-turn state persists across a conversation; the planning step
       is visible in agent output.
 - [ ] **5. Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably
       blocking an unconfirmed destructive action.
