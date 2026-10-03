@@ -10,9 +10,15 @@ import os
 from langchain_core.language_models.chat_models import BaseChatModel
 
 
-def get_chat_model(**kwargs) -> BaseChatModel:
-    """Return the chat model selected by the LLM_PROVIDER env var (default: ollama)."""
-    provider = os.getenv("LLM_PROVIDER", "ollama")
+def get_chat_model(provider: str | None = None, **kwargs) -> BaseChatModel:
+    """Return a chat model for `provider`, or the LLM_PROVIDER env var if not given (default: ollama).
+
+    The explicit `provider` override exists for callers that need a
+    *different* model than the app's default — e.g. an eval judge using a
+    stronger model than the agent it's grading, a well-established
+    LLM-as-judge practice (see DECISIONS.md #18).
+    """
+    provider = provider or os.getenv("LLM_PROVIDER", "ollama")
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama

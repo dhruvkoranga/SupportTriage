@@ -23,7 +23,10 @@ chromadb==0.5.20             # embedded vector database backing langchain-chroma
 langgraph-checkpoint-sqlite==2.0.1   # persists multi-turn conversation state across a LangGraph run, to a local SQLite file
 
 # --- Phase 5: Evaluation & observability ---
-ragas==0.2.6                 # retrieval evaluation (faithfulness, context precision/recall) for the Research agent
+# No ragas here on purpose — its dependency tree has no release compatible with the
+# langchain-core 0.3.x generation this project is pinned to (see DECISIONS.md #8).
+# evals/research_quality_eval.py is a hand-rolled LLM-as-judge evaluator instead,
+# using only packages already listed above.
 langsmith==0.1.147           # tracing/observability for the LangGraph pipeline
 
 # --- Phase 6: Production shape ---

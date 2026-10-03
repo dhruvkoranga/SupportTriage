@@ -13,8 +13,16 @@ from langchain_core.messages import ToolMessage
 _MAX_ITERATIONS = 4
 
 
-def run_tool_loop(llm_with_tools, tools: list, messages: list) -> str:
-    """Invoke llm_with_tools, executing any requested tools, until it gives a final answer."""
+def run_tool_loop(
+    llm_with_tools, tools: list, messages: list, trace: list[str] | None = None
+) -> str:
+    """Invoke llm_with_tools, executing any requested tools, until it gives a final answer.
+
+    If `trace` is given, each called tool's name is appended to it in order —
+    used by the trajectory evaluator (see evals/trajectory_eval.py) to check
+    whether the agent called the right tools. Doubles as free, always-on
+    observability even without a tracer like LangSmith configured.
+    """
     tool_map = {t.name: t for t in tools}
 
     for _ in range(_MAX_ITERATIONS):
@@ -25,6 +33,8 @@ def run_tool_loop(llm_with_tools, tools: list, messages: list) -> str:
             return response.content
 
         for call in response.tool_calls:
+            if trace is not None:
+                trace.append(call["name"])
             result = tool_map[call["name"]].invoke(call["args"])
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 

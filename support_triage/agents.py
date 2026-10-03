@@ -103,8 +103,9 @@ def diagnosis_node(state: TriageState) -> dict:
         ("system", DIAGNOSIS_SYSTEM_PROMPT),
         ("human", f"Ticket: {state['ticket_text']}"),
     ]
-    answer = run_tool_loop(llm_with_tools, tools, messages)
-    return {"agent_output": answer}
+    trace: list[str] = []
+    answer = run_tool_loop(llm_with_tools, tools, messages, trace=trace)
+    return {"agent_output": answer, "tool_trace": trace}
 
 
 def escalation_node(state: TriageState) -> dict:

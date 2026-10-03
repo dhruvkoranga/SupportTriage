@@ -51,3 +51,29 @@ def test_run_tool_loop_gives_up_after_max_iterations():
     result = run_tool_loop(llm, [add], messages=[])
 
     assert "tool-call limit" in result.lower()
+
+
+def test_run_tool_loop_records_tool_names_in_order_when_trace_given():
+    first_call = SimpleNamespace(
+        content="", tool_calls=[{"name": "add", "args": {"a": 1, "b": 1}, "id": "c1"}]
+    )
+    second_call = SimpleNamespace(
+        content="", tool_calls=[{"name": "add", "args": {"a": 2, "b": 2}, "id": "c2"}]
+    )
+    final_response = SimpleNamespace(content="done", tool_calls=[])
+    llm = _ScriptedLLM([first_call, second_call, final_response])
+
+    trace: list[str] = []
+    run_tool_loop(llm, [add], messages=[], trace=trace)
+
+    assert trace == ["add", "add"]
+
+
+def test_run_tool_loop_trace_stays_empty_when_no_tool_is_called():
+    final_response = SimpleNamespace(content="no tool needed", tool_calls=[])
+    llm = _ScriptedLLM([final_response])
+
+    trace: list[str] = []
+    run_tool_loop(llm, [add], messages=[], trace=trace)
+
+    assert trace == []

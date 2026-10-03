@@ -16,6 +16,13 @@ def test_get_chat_model_anthropic_provider(monkeypatch):
     assert model.__class__.__name__ == "ChatAnthropic"
 
 
+def test_get_chat_model_explicit_provider_overrides_env_var(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    model = get_chat_model(provider="anthropic")
+    assert model.__class__.__name__ == "ChatAnthropic"
+
+
 def test_get_chat_model_unknown_provider_raises(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "made_up_provider")
     with pytest.raises(ValueError):

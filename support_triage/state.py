@@ -33,6 +33,7 @@ class TriageState(TypedDict, total=False):
     classification_reasoning: str
     agent_output: str
     proposed_actions: list[ProposedAction]
+    tool_trace: list[str]
 
 
 class SubtaskResult(TypedDict):

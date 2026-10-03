@@ -178,17 +178,29 @@ server/client code against it — the two are genuinely different APIs, not just
 
 ## 8. Evaluation
 
-**Choice:** [RAGAS](https://docs.ragas.io/) for the Research Agent's retrieval quality
-(faithfulness, context precision/recall); a small custom trajectory-evaluation harness (asserts
-against the LangGraph run's list of tool calls) for "did the agent call the right tools, in the
-right order"; LangSmith for tracing/observability across the whole pipeline.
+**Choice (revised from the original plan):** a hand-rolled LLM-as-judge evaluator
+(`evals/research_quality_eval.py`) for the Research Agent's faithfulness and correctness, not
+RAGAS; a small custom trajectory-evaluation harness (`evals/trajectory_eval.py`) for "did the
+agent call the right tools"; LangSmith for tracing/observability across the whole pipeline.
 
-**Why:** RAGAS is the standard, purpose-built tool for RAG evaluation — no reason to hand-roll
-faithfulness scoring. Trajectory evaluation has no equally dominant off-the-shelf tool for a
-LangGraph-specific pipeline, so a small custom harness (a list of expected tool-call sequences per
-test case, diffed against the actual run) is simpler than adopting a heavier eval framework for
-one narrow check. LangSmith is the natural tracing choice given LangGraph is already a LangChain
-project — first-party integration, no extra instrumentation code.
+**Why the change:** the original plan was RAGAS. At Phase 5, installing the pinned
+`ragas==0.2.6` broke the whole dependency tree — it pulled `langchain-core` 1.6.x, conflicting
+with `langchain-anthropic`, `langchain-ollama`, and `langgraph-checkpoint-sqlite`, all pinned to
+the 0.3.x generation this project is built on. This isn't a version I guessed wrong (like the
+`mcp` pin back in Phase 2) — there is no RAGAS release compatible with our stack: `ragas` 0.1.x
+requires `langchain-core<0.3` (older than what we're on), and 0.2.x+ transitively pulls the
+current `langchain` package, which has moved to the 1.x+ generation. Forcing compatibility would
+mean upgrading the entire LangChain/LangGraph stack this late in the project — real risk of
+breaking Phases 1-4 — just to add one evaluation metric. The project brief itself sanctions the
+alternative ("RAGAS **or** LLM-as-judge"), so that's the one actually built. Trajectory evaluation
+has no equally dominant off-the-shelf tool for a LangGraph-specific pipeline regardless, so a
+small custom harness (expected tool names per test case, checked against an actual run) was
+always the plan there. LangSmith needs no code at all — it instruments LangChain/LangGraph calls
+automatically once `LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY` are set (see `.env.example`).
+
+**Revisit if:** this project's LangChain/LangGraph pins are ever deliberately upgraded to the 1.x
+generation for other reasons — at that point RAGAS becomes installable again and worth
+reconsidering, since it remains the more standard tool when it fits.
 
 ---
 
@@ -422,3 +434,66 @@ changed — which is the entire point of the guardrail in #14. It's a reminder t
 job is to catch imperfect upstream judgment, not to assume the judgment upstream is already
 correct. Tightening this further is exactly the kind of thing Phase 5's evaluation work is for,
 not something worth hand-chasing example by example (same conclusion as #13).
+
+---
+
+## 18. A weak judge inherits the weaknesses of the thing it's judging
+
+**What happened:** running `evals/research_quality_eval.py` for the first time, the local-model
+judge (same `llama3.1:8b` the agent itself uses) scored the "tax rates" answer as **not faithful**
+because it "adds the word 'next'" to the catalog-sync claim — except "next catalog sync" is
+copied verbatim from the KB article the agent was given. It also scored the answer **not correct**
+for "missing the key detail that tax rates are set per region" — except the answer literally says
+"configured by region." Both verdicts are factually wrong, and wrong in a specific way: the judge
+contradicted the very context it was handed to grade against.
+
+**Why this matters, not just "the judge made a mistake":** this is the same reading-comprehension
+limitation from Phase 1's grounding-failure finding (`llama3.2:3b` ignoring context that directly
+answered the question) — except here it shows up in the *evaluator*, which is a worse place for it
+to hide. A flaky agent produces a visibly bad answer. A flaky judge produces a *confidently wrong
+verdict about a good answer*, which looks like a passing grade or a failing grade depending on
+luck, and either way erodes trust in the whole eval without anyone noticing why.
+
+**Fix:** `get_chat_model()` now takes an optional `provider` argument that overrides
+`LLM_PROVIDER` for just that call (`support_triage/llm.py`) — a few-line addition on top of the
+existing factory from #2. `evals/research_quality_eval.py` reads a separate `JUDGE_LLM_PROVIDER`
+env var, defaulting to whatever the agent uses (free, local, consistent with everything else) but
+overridable to `anthropic` for a stronger, independent judge. This is standard LLM-as-judge
+practice — grade with a model at least as capable as the one you're grading, ideally more capable
+— made cheap to do here specifically because the provider-swap seam from #2 already existed.
+Left as opt-in rather than default: switching the judge costs real money per run, and that's the
+user's call to make, not something to spend on their behalf.
+
+**A second, recurring finding bundled into this fix:** the judge calls also hit the same
+`with_structured_output()` returning `None` issue first seen in `planning.py`'s `plan_node` back
+in Phase 3 — a local-model JSON-parsing miss, not a code bug. This is now the second independent
+place it's shown up, which upgrades it from "one-off flakiness" to "a real characteristic of this
+model worth defending against anywhere structured output is requested." `evals/research_quality_eval.py`
+retries up to 3 times before giving up. Production call sites (`triage_node`, `plan_node`) don't
+have this retry yet — worth adding if it's ever seen live rather than just in evals, but not
+speculatively added now without evidence it affects the production path the same way.
+
+---
+
+## 19. The trajectory eval found a real gap — and it wasn't "fixed"
+
+**What happened:** `evals/trajectory_eval.py` checks whether Diagnosis calls the tool(s) a case
+expects. Of 3 cases, one failed: "Order 4821 payments keep timing out, what's going on?" expected
+`search_logs` (the seeded log data has an exact matching timeout error for order 4821), but the
+agent only called `query_order_status`, got back "PROCESSING," and stopped — never checking the
+logs that would have explained *why*.
+
+**Why this was left as a documented finding, not patched:** the easy fix would be rewording
+`DIAGNOSIS_SYSTEM_PROMPT` until this specific case passes. That's eval-gaming — tuning a prompt
+to one known test case doesn't generalize, and a 3/3 produced that way would be a worse, less
+honest signal than an honest 2/3 with a concrete explanation attached. The whole point of building
+this harness was to surface real gaps systematically rather than catching them one hand-run
+example at a time (the same conclusion #13 and #17 already reached, now demonstrated rather than
+just argued). A 100% pass rate obtained by chasing the eval would mean the harness stopped doing
+its job.
+
+**Revisit if:** this specific failure mode (stopping after one tool when the ticket describes a
+symptom a second tool could confirm) shows up across *multiple* independent cases, not just
+one — a pattern, not a single data point, is what would justify a real prompt change
+(e.g., "if the ticket describes an error/symptom, check logs even if order status already answered
+part of the question").

@@ -62,8 +62,8 @@ were.
 | Sub-task fan-out | LangGraph `Send` API (parallel branches, `operator.add` reducer to merge) |
 | Human approval | LangGraph `interrupt()`/`Command(resume=...)`, pausing the checkpointed graph |
 | API layer | FastAPI |
-| Evaluation | RAGAS (retrieval) + custom trajectory evaluation (tool-call correctness) |
-| Tracing | LangSmith |
+| Evaluation | Hand-rolled LLM-as-judge (retrieval) + custom trajectory evaluation (tool-call correctness) |
+| Tracing | LangSmith (opt-in via env vars, no code) |
 
 ## Phase roadmap
 
@@ -79,8 +79,10 @@ were.
       (LangGraph `interrupt()`) before any destructive action; the tools that action only ever get
       called from that one approval step, never from the agent that proposes them; low-confidence
       tickets are automatically escalated rather than guessed at.
-- [ ] **Phase 5 — Evaluation & observability**: RAGAS/LLM-as-judge for retrieval; trajectory
-      evaluation for the agent; LangSmith tracing.
+- [x] **Phase 5 — Evaluation & observability**: hand-rolled LLM-as-judge for Research agent
+      faithfulness/correctness (RAGAS isn't installable on this project's pinned dependency
+      generation — see DECISIONS.md #8); a trajectory evaluator for the Diagnosis agent's tool
+      choices; LangSmith tracing (opt-in via env vars).
 - [ ] **Phase 6 — Production shape**: FastAPI backend; Snowflake Cortex for at least one model
       call; basic auth + logging.
 
@@ -140,6 +142,23 @@ python -m support_triage.main "Please refund order 55 for $20, I was double char
 > deliberately deferred until that's installed — it's not blocking any Phase 1 or 2 functionality
 > in the meantime, since Research currently uses plain keyword search.
 
+### Evaluation
+
+Two manual eval scripts live in `evals/` — separate from `tests/` (which runs fast, mocked, on
+every `pytest` call). These call a real LLM, take a few seconds per case, and are run by hand:
+
+```bash
+python -m evals.trajectory_eval          # did Diagnosis call the right tool(s)?
+python -m evals.research_quality_eval    # LLM-as-judge: faithfulness + correctness
+```
+
+`research_quality_eval` judges with whatever `LLM_PROVIDER` is set to by default — which,
+honestly, isn't reliable: judging with the same small local model as the agent under test
+reproduces the same grounding weaknesses in the judge itself (see
+[DECISIONS.md](DECISIONS.md#18-a-weak-judge-inherits-the-weaknesses-of-the-thing-its-judging) for
+a concrete example it caught). Set `JUDGE_LLM_PROVIDER=anthropic` in `.env` for a stronger,
+independent judge — standard LLM-as-judge practice, costs a small amount per run on your API key.
+
 ## Suggested GitHub checkpoints
 
 Each checkpoint below is a natural, self-contained, reviewable unit of work — a good point to
@@ -157,8 +176,8 @@ and confirms readiness; you run the actual git commands — see [CLAUDE.md](CLAU
       is visible in agent output.
 - [x] **5. Phase 4 complete** — human-in-the-loop approval gate and guardrails are demonstrably
       blocking an unconfirmed destructive action.
-- [ ] **6. Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
-      visible for a sample run.
+- [x] **6. Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
+      visible for a sample run (once `LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY` are set).
 - [ ] **7. Phase 6 complete** — FastAPI backend serves the pipeline behind basic auth, with at
       least one live Snowflake Cortex call, and logging in place.
 
