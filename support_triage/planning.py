@@ -9,7 +9,7 @@ from langgraph.types import Send
 from pydantic import BaseModel, Field
 
 from support_triage.graph import build_graph
-from support_triage.llm import get_chat_model
+from support_triage.llm import get_chat_model, invoke_structured
 from support_triage.state import PlanningState
 
 PLAN_SYSTEM_PROMPT = (
@@ -40,10 +40,8 @@ class PlanningResult(BaseModel):
 
 
 def plan_node(state: PlanningState) -> dict:
-    llm = get_chat_model()
-    structured_llm = llm.with_structured_output(PlanningResult)
-    result: PlanningResult = structured_llm.invoke(
-        [("system", PLAN_SYSTEM_PROMPT), *state["messages"]]
+    result: PlanningResult = invoke_structured(
+        get_chat_model(), PlanningResult, [("system", PLAN_SYSTEM_PROMPT), *state["messages"]]
     )
     return {"sub_tasks": result.sub_tasks}
 

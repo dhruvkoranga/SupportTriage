@@ -55,7 +55,7 @@ were.
 | Orchestration | LangGraph |
 | LLM (dev, default) | Ollama, local + free (`llama3.1:8b`) via `langchain-ollama` |
 | LLM (dev, optional) | Anthropic API (`claude-sonnet-5`) via `langchain-anthropic` |
-| LLM (prod, Phase 6) | Snowflake Cortex via `langchain-community` |
+| LLM (prod, Phase 6) | Snowflake Cortex via `langchain-community`, verified live (completion-only — see note below) |
 | RAG vector store | Chroma |
 | Tool protocol | MCP (log-search tool) + direct LangChain tools (ticketing API, DB query) |
 | Multi-turn memory | LangGraph `SqliteSaver` checkpointer, keyed by `ticket_id` |
@@ -83,8 +83,10 @@ were.
       faithfulness/correctness (RAGAS isn't installable on this project's pinned dependency
       generation — see DECISIONS.md #8); a trajectory evaluator for the Diagnosis agent's tool
       choices; LangSmith tracing (opt-in via env vars).
-- [ ] **Phase 6 — Production shape**: FastAPI backend; Snowflake Cortex for at least one model
-      call; basic auth + logging.
+- [x] **Phase 6 — Production shape**: FastAPI backend wrapping the conversation graph; Snowflake
+      Cortex wired into the provider factory, verified live against a real trial account (a real
+      bug in `ChatSnowflakeCortex`'s credential-loading validator was found and worked around
+      along the way — see DECISIONS.md #20); API-key auth; structured request logging.
 
 ## Setup
 
@@ -107,6 +109,9 @@ cp .env.example .env
 No API key is required by default — LLM_PROVIDER=ollama runs entirely locally and free. Set
 LLM_PROVIDER=anthropic in .env (and add an ANTHROPIC_API_KEY) if you want to compare output
 quality against a paid model — see [DECISIONS.md](DECISIONS.md#2-llm-provider-strategy-dev-vs-production).
+
+The CLI (`main.py`) needs nothing beyond the above. The FastAPI backend additionally needs
+`API_KEY` set in `.env` to any non-guessable string — see "Run the API" below.
 
 ### Try it
 
@@ -141,6 +146,31 @@ python -m support_triage.main "Please refund order 55 for $20, I was double char
 > Build Tools to compile on Windows. The Research agent's Chroma-backed RAG upgrade is
 > deliberately deferred until that's installed — it's not blocking any Phase 1 or 2 functionality
 > in the meantime, since Research currently uses plain keyword search.
+
+### Run the API
+
+The same conversation graph, over HTTP — for a system like this, this is the shape a real
+integration (a support desk tool, a Slack bot) would actually call, not the CLI.
+
+```bash
+uvicorn support_triage.api:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/tickets/T-1002/messages \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"text": "Please refund order 55 for $20, I was double charged"}'
+# -> {"status": "pending_approval", "draft_summary": "...", "proposed_actions": [...]}
+
+curl -X POST http://127.0.0.1:8000/tickets/T-1002/approve \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"approved": true}'
+# -> {"status": "completed", "reply": "...Refund of $20.00 issued for order 55..."}
+```
+
+`GET /health` needs no auth; every other route needs the `X-API-Key` header to match `API_KEY`
+from `.env`. See [DECISIONS.md](DECISIONS.md#20-phase-6-fastapi-shape-a-real-dependency-conflict-and-snowflake-cortex-honestly-scoped)
+for how this reuses the exact same turn/approval logic as the CLI, not a separate implementation.
 
 ### Evaluation
 
@@ -178,8 +208,10 @@ and confirms readiness; you run the actual git commands — see [CLAUDE.md](CLAU
       blocking an unconfirmed destructive action.
 - [x] **6. Phase 5 complete** — evaluation harness runs and produces a report; LangSmith traces are
       visible for a sample run (once `LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY` are set).
-- [ ] **7. Phase 6 complete** — FastAPI backend serves the pipeline behind basic auth, with at
-      least one live Snowflake Cortex call, and logging in place.
+- [x] **7. Phase 6 complete** — FastAPI backend serves the pipeline behind API-key auth, with
+      logging in place; Snowflake Cortex integration verified live against a real account
+      (`python -m evals.snowflake_cortex_demo`), including a real upstream bug found and worked
+      around along the way — see DECISIONS.md #20.
 
 Within a large phase, feel free to commit sub-steps (e.g., "add Research agent" then "add
 Diagnosis agent") rather than waiting for the whole phase — smaller, reviewable diffs are

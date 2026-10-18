@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from support_triage.agents import research_node
-from support_triage.llm import get_chat_model
+from support_triage.llm import get_chat_model, invoke_structured
 from support_triage.tools import search_knowledge_base
 
 _JUDGE_PROVIDER = os.getenv("JUDGE_LLM_PROVIDER") or None
@@ -83,24 +83,9 @@ class CorrectnessJudgment(BaseModel):
     reasoning: str = Field(description="One sentence explaining the verdict.")
 
 
-_MAX_JUDGE_ATTEMPTS = 3
-
-
-def _invoke_judge(schema, messages):
-    """Retries on None — with_structured_output() occasionally returns None
-    on this local model when it fails to parse its own output as JSON (also
-    seen in planning.py's plan_node; see DECISIONS.md #18). A judge call
-    isn't worth failing an entire eval run over a transient parse miss."""
-    llm = get_chat_model(provider=_JUDGE_PROVIDER).with_structured_output(schema)
-    for attempt in range(_MAX_JUDGE_ATTEMPTS):
-        result = llm.invoke(messages)
-        if result is not None:
-            return result
-    raise RuntimeError(f"Judge returned None after {_MAX_JUDGE_ATTEMPTS} attempts.")
-
-
 def _judge_faithfulness(context: str, answer: str) -> FaithfulnessJudgment:
-    return _invoke_judge(
+    return invoke_structured(
+        get_chat_model(provider=_JUDGE_PROVIDER),
         FaithfulnessJudgment,
         [
             ("system", _FAITHFULNESS_JUDGE_PROMPT),
@@ -110,7 +95,8 @@ def _judge_faithfulness(context: str, answer: str) -> FaithfulnessJudgment:
 
 
 def _judge_correctness(reference: str, answer: str) -> CorrectnessJudgment:
-    return _invoke_judge(
+    return invoke_structured(
+        get_chat_model(provider=_JUDGE_PROVIDER),
         CorrectnessJudgment,
         [
             ("system", _CORRECTNESS_JUDGE_PROMPT),

@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from support_triage.db import query_order_status
-from support_triage.llm import get_chat_model
+from support_triage.llm import get_chat_model, invoke_structured
 from support_triage.mcp_integration.client import search_logs_via_mcp
 from support_triage.state import Category, TriageState
 from support_triage.ticketing import add_internal_note, close_ticket, get_ticket, issue_refund
@@ -70,10 +70,10 @@ class TriageClassification(BaseModel):
 
 
 def triage_node(state: TriageState) -> dict:
-    llm = get_chat_model()
-    structured_llm = llm.with_structured_output(TriageClassification)
-    result: TriageClassification = structured_llm.invoke(
-        [("system", TRIAGE_SYSTEM_PROMPT), ("human", state["ticket_text"])]
+    result: TriageClassification = invoke_structured(
+        get_chat_model(),
+        TriageClassification,
+        [("system", TRIAGE_SYSTEM_PROMPT), ("human", state["ticket_text"])],
     )
     category = result.category if result.confident else "escalation"
     return {"category": category, "classification_reasoning": result.reasoning}

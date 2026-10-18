@@ -206,8 +206,16 @@ reconsidering, since it remains the more standard tool when it fits.
 
 ## 9. Auth (Phase 6)
 
-**Choice:** Simple API-key (Bearer token) auth via FastAPI dependency injection, key stored in an
-environment variable.
+**Choice:** Simple API-key auth via FastAPI dependency injection (`support_triage/api.py`'s
+`require_api_key`), key stored in an environment variable (`API_KEY`), checked against a plain
+`X-API-Key` request header.
+
+*(Implemented as a custom header, not literally FastAPI's `HTTPBearer`/`Authorization: Bearer`
+scheme as first scoped here at project start — a deliberately smaller difference than it might
+look: both are "one static key, one header, one dependency check." `X-API-Key` is at least as
+common a convention for this exact use case — plenty of real APIs use it — and it's simpler to
+demo with `curl -H "X-API-Key: ..."` than constructing a Bearer header. Noted here rather than
+silently diverging from what this file originally said.)*
 
 **Alternatives considered:** Full OAuth2/JWT with a user database
 
@@ -466,12 +474,19 @@ user's call to make, not something to spend on their behalf.
 
 **A second, recurring finding bundled into this fix:** the judge calls also hit the same
 `with_structured_output()` returning `None` issue first seen in `planning.py`'s `plan_node` back
-in Phase 3 — a local-model JSON-parsing miss, not a code bug. This is now the second independent
-place it's shown up, which upgrades it from "one-off flakiness" to "a real characteristic of this
-model worth defending against anywhere structured output is requested." `evals/research_quality_eval.py`
-retries up to 3 times before giving up. Production call sites (`triage_node`, `plan_node`) don't
-have this retry yet — worth adding if it's ever seen live rather than just in evals, but not
-speculatively added now without evidence it affects the production path the same way.
+in Phase 3 — a local-model JSON-parsing miss, not a code bug. Two independent occurrences was
+already enough to retry in the eval judges specifically, while deliberately not yet touching
+`triage_node`/`plan_node` — "not speculatively added without evidence it affects the production
+path the same way" (as this entry originally said here).
+
+**Update, Phase 6:** evidence arrived. Live-testing the CLI after the `conversation_runner`
+refactor, `plan_node` hit the exact same `None` return — a third independent occurrence, in
+production code this time, not an eval. That crossed the threshold this entry itself set. Fixed by
+extracting the retry into one shared `invoke_structured()` helper in `llm.py`, now used by
+`triage_node`, `plan_node`, *and* the eval judges (which no longer carry their own copy of the
+retry loop). One fix, three call sites, instead of three ad hoc patches — the same "don't duplicate
+what already has one correct implementation" reasoning as #11 and the Phase 5 judge-provider
+override.
 
 ---
 
@@ -497,3 +512,98 @@ symptom a second tool could confirm) shows up across *multiple* independent case
 one — a pattern, not a single data point, is what would justify a real prompt change
 (e.g., "if the ticket describes an error/symptom, check logs even if order status already answered
 part of the question").
+
+---
+
+## 20. Phase 6: FastAPI shape, a real dependency conflict, and Snowflake Cortex honestly scoped
+
+**FastAPI wraps the existing graph, doesn't change it.** `support_triage/api.py` adds two routes
+(`POST /tickets/{id}/messages`, `POST /tickets/{id}/approve`) plus `/health`. Neither route
+contains any new application logic — both just call `conversation_runner.py`'s `send_message()` /
+`submit_approval()`, a small module extracted from what used to be duplicated between `main.py`
+and this file: "run the graph, check `get_state().next` for a pending interrupt, shape the
+result." `main.py` was refactored to use the same module rather than keeping its own copy. One
+seam, two callers (CLI and HTTP) — the same "small, reusable, independently testable piece" pattern
+as `tool_loop.py` (#10) and the core graph reused as a black box (#11).
+
+**A real dependency conflict, caught before it became a runtime failure:** installing the
+originally-pinned `fastapi==0.115.5` alongside the already-installed `mcp==2.2.0` broke on
+`starlette` — `mcp` pulls in `sse-starlette`, which needs `starlette>=0.49.1`; `fastapi==0.115.5`
+needs `starlette==0.41.3`. Unlike the `ragas` situation (#8), this one was cheap to resolve:
+FastAPI/Starlette have stayed backward-compatible across this range, so bumping to current
+(`fastapi==0.143.5`, pulling `starlette==1.8.0`) resolved cleanly with zero other conflicts,
+verified with `pip check` and the full test suite before trusting it. The lesson from #8 still
+applies — check whether the upgrade is actually safe before taking it — the difference here is the
+check came back "yes, this one's fine," not "no, this breaks everything downstream."
+
+**A second guessed-wrong package name, caught the same way as `mcp` back in #7:** `requirements.txt`
+had pinned `snowflake-connector-python` for the Cortex integration, written at project scaffolding
+before any Snowflake code existed. `ChatSnowflakeCortex` (`langchain_community.chat_models`)
+actually imports `snowflake.snowpark`, a different package (`snowflake-snowpark-python`) with a
+different API. Caught by reading the integration's actual source before writing code against it,
+not by trial and error at runtime.
+
+**Snowflake Cortex is completion-only — verified by reading its source, not assumed.**
+`ChatSnowflakeCortex._generate()` converts the message list to a plain string and calls
+`SNOWFLAKE.CORTEX.COMPLETE()` via SQL; it never inspects a `tools` kwarg anywhere in its body.
+`bind_tools()`/`with_structured_output()` are present on the class only because they're inherited
+from `BaseChatModel` — calling them wouldn't raise, but the underlying request would silently drop
+the tool schema, since nothing in `_generate()` ever looks for it. This means `LLM_PROVIDER=snowflake_cortex`
+is **not** a drop-in replacement for Ollama/Anthropic in this app: Triage needs
+`with_structured_output()`, Diagnosis and Escalation need `bind_tools()`, and none of those would
+actually work correctly against Cortex through this integration. Scoped accordingly — Cortex is
+wired into `get_chat_model()` as a selectable provider and demonstrated with one plain
+`.invoke()` call (`evals/snowflake_cortex_demo.py`), matching the brief's actual bar ("at least
+one model call"), not pretended to be more than that.
+
+**Update: verified live against a real account, and a real upstream bug found along the way.**
+A free-trial Snowflake account became available shortly after this was written. Running
+`evals/snowflake_cortex_demo.py` for the first time failed — not on credentials, but with
+`AttributeError: 'NoneType' object has no attribute 'sql'` inside `ChatSnowflakeCortex._generate()`.
+Diagnosed by checking `model._sp_session is None` directly after construction: `True`, with
+`model.snowflake_username` also empty — meaning `validate_environment` (the `@pre_init`-decorated
+validator that's supposed to read the `SNOWFLAKE_*` env vars and open the Snowpark session) never
+ran at all. Confirmed definitively via `ChatSnowflakeCortex.__pydantic_decorators__`: the validator
+*is* registered, in the `root_validators` bucket (pydantic v2's v1-compat shim), but never fires
+during normal construction under this project's installed `pydantic`/`langchain-core` versions — a
+real compatibility bug in a community package, not a credentials problem, confirmed by manually
+constructing a Snowpark `Session` with the same credentials outside the class entirely and having
+it connect successfully on the first try.
+
+**The fix:** don't rely on `ChatSnowflakeCortex`'s broken auto-validator at all.
+`_build_snowflake_cortex_chat_model()` in `llm.py` now builds the `Session` itself
+(`Session.builder.configs({...}).create()`, reading the same env vars the class was supposed to
+read) and injects it directly as `chat_model._sp_session = session` — bypassing the broken
+validator entirely rather than trying to fix pydantic v1/v2 compat shims in someone else's package.
+`tests/test_llm.py` was updated to assert `model._sp_session is fake_session`, which fails loudly
+if this workaround (or the real validator, if a future `langchain-community` fixes it) ever stops
+running.
+
+**A second finding along the way:** the default model (`snowflake-arctic`, `ChatSnowflakeCortex`'s
+own default) isn't available in this account's Cortex region — the API returned `unknown model
+"snowflake-arctic"`. Rather than guess at another name, tried a short list of broadly-available
+Cortex models against the real account; `llama3.1-8b` worked on the first attempt. That's the new
+default (`SNOWFLAKE_CORTEX_MODEL`), documented as region-dependent — a different account may need
+a different one.
+
+**A third, incidental finding while debugging this:** `support_triage/api.py` calls `load_dotenv()`
+at module level (necessary — `uvicorn support_triage.api:app` imports the module directly, there's
+no `main()` entry point to call it from instead, unlike `main.py`). That means importing
+`test_api.py` anywhere in a pytest run loads the developer's real `.env` into `os.environ` for the
+*rest of that pytest process* — which is exactly what made `test_get_chat_model_snowflake_cortex_provider`
+flake the moment a real `SNOWFLAKE_CORTEX_MODEL` existed locally: it silently picked up
+`snowflake-arctic` from `.env` instead of the test's intended default. Fixed with an explicit
+`monkeypatch.delenv("SNOWFLAKE_CORTEX_MODEL")` in that test rather than changing `api.py` — the
+module-level `load_dotenv()` is a legitimate FastAPI/uvicorn pattern, not the bug; tests that touch
+env vars near it need to be explicit about their own state rather than assume a clean environment.
+
+**Logging** is scoped to the FastAPI layer (`support_triage/api.py`): one structured line per
+request (`ticket_id`, event, status, duration) via Python's standard `logging` module — no new
+dependency. `main.py` stays plain `print()`-based, consistent with it being a dev/demo CLI rather
+than the production entry point the brief's "basic auth + logging" is actually about.
+
+**Revisit if:** `langchain-community` ships a fix for the validator bug — at that point the manual
+`Session`-building workaround in `_build_snowflake_cortex_chat_model()` could be simplified back to
+a plain `ChatSnowflakeCortex(model=model, **kwargs)` call, and it's worth checking whether Cortex
+has gained genuine tool-calling support upstream before ruling out using it for an agent node, not
+just a demo call.
